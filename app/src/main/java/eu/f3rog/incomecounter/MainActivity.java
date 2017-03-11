@@ -12,16 +12,17 @@ import java.util.concurrent.TimeUnit;
 
 import blade.Blade;
 import blade.State;
-import rx.Emitter;
-import rx.Observable;
-import rx.Observer;
-import rx.Subscription;
-import rx.android.schedulers.AndroidSchedulers;
-import rx.functions.Action1;
-import rx.functions.Func1;
-import rx.functions.Func2;
-import rx.internal.util.SubscriptionList;
-import rx.schedulers.Schedulers;
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
+import io.reactivex.FlowableEmitter;
+import io.reactivex.FlowableOnSubscribe;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.functions.BiFunction;
+import io.reactivex.functions.Consumer;
+import io.reactivex.functions.Function;
+import io.reactivex.internal.disposables.ListCompositeDisposable;
+import io.reactivex.schedulers.Schedulers;
 
 @Blade
 public final class MainActivity
@@ -33,7 +34,7 @@ public final class MainActivity
     long mStartTime;
 
     @NonNull
-    private SubscriptionList mSubscriptionList = new SubscriptionList();
+    private ListCompositeDisposable mDisposables = new ListCompositeDisposable();
 
     @NonNull
     private EditText mHourPriceText;
@@ -61,61 +62,57 @@ public final class MainActivity
 
         mHourPriceText.setText(String.format(Locale.getDefault(), "%.2f", DEFAULT_PRICE));
 
-        final Subscription subscription = Observable.combineLatest(hoursElapsed(), currentHourlyPrice(),
-                new Func2<Double, Double, Double>() {
+        final Disposable disposable = Flowable.combineLatest(hoursElapsed(), currentHourlyPrice(),
+                new BiFunction<Double, Double, Double>() {
                     @Override
-                    public Double call(@NonNull final Double hours, @NonNull final Double price) {
+                    public Double apply(@NonNull final Double hours, @NonNull final Double price) {
                         return hours * price;
                     }
                 })
                 .subscribeOn(Schedulers.io())
-                .map(new Func1<Double, String>() {
+                .map(new Function<Double, String>() {
                     @Override
-                    public String call(@NonNull final Double income) {
+                    public String apply(@NonNull final Double income) {
                         return String.format(Locale.getDefault(), "%.3f€", income);
                     }
                 })
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(new Observer<String>() {
+                .subscribe(new Consumer<String>() {
                     @Override
-                    public void onCompleted() {
-                    }
-
-                    @Override
-                    public void onError(Throwable e) {
-                        mIncomeText.setText("Error: " + e.getMessage());
-                    }
-
-                    @Override
-                    public void onNext(@NonNull final String text) {
+                    public void accept(@NonNull final String text) throws Exception {
                         mIncomeText.setText(text);
+                    }
+                }, new Consumer<Throwable>() {
+                    @Override
+                    public void accept(@NonNull final Throwable e) throws Exception {
+                        mIncomeText.setText("Error: " + e.getMessage());
                     }
                 });
 
-        mSubscriptionList.add(subscription);
+        mDisposables.add(disposable);
     }
 
-    private Observable<Double> hoursElapsed() {
-        return Observable.interval(100, TimeUnit.MILLISECONDS)
+    private Flowable<Double> hoursElapsed() {
+        return Flowable.interval(100, TimeUnit.MILLISECONDS)
                 .subscribeOn(Schedulers.io())
-                .map(new Func1<Long, Long>() {
+                .map(new Function<Long, Long>() {
                     @Override
-                    public Long call(@NonNull final Long ignored) {
+                    public Long apply(@NonNull final Long ignored) {
                         final long currentTime = System.currentTimeMillis();
                         return currentTime - mStartTime;
                     }
                 })
                 .observeOn(AndroidSchedulers.mainThread())
-                .doOnNext(new Action1<Long>() {
+                .doOnNext(new Consumer<Long>() {
                     @Override
-                    public void call(@NonNull final Long ms) {
+                    public void accept(@NonNull final Long ms) {
                         mTimeText.setText(formatInterval(ms));
                     }
                 })
                 .observeOn(Schedulers.io())
-                .map(new Func1<Long, Double>() {
+                .map(new Function<Long, Double>() {
                     @Override
-                    public Double call(@NonNull final Long ms) {
+                    public Double apply(@NonNull final Long ms) {
                         return (double) ms / 1000d / 60d / 60d;
                     }
                 });
@@ -129,11 +126,11 @@ public final class MainActivity
         return String.format(Locale.getDefault(), "%02d:%02d:%02d.%03d", hr, min, sec, restMs);
     }
 
-    private Observable<Double> currentHourlyPrice() {
-        return Observable.fromEmitter(new Action1<Emitter<Double>>() {
+    private Flowable<Double> currentHourlyPrice() {
+        return Flowable.create(new FlowableOnSubscribe<Double>() {
             @Override
-            public void call(final Emitter<Double> doubleEmitter) {
-                doubleEmitter.onNext(getHourPrice());
+            public void subscribe(@NonNull final FlowableEmitter<Double> emitter) throws Exception {
+                emitter.onNext(getHourPrice());
                 mHourPriceText.addTextChangedListener(new TextWatcher() {
                     @Override
                     public void beforeTextChanged(CharSequence charSequence, int i, int i1, int i2) {
@@ -145,11 +142,11 @@ public final class MainActivity
 
                     @Override
                     public void afterTextChanged(Editable editable) {
-                        doubleEmitter.onNext(getHourPrice());
+                        emitter.onNext(getHourPrice());
                     }
                 });
             }
-        }, Emitter.BackpressureMode.BUFFER);
+        }, BackpressureStrategy.BUFFER);
     }
 
     private Double getHourPrice() {
@@ -165,6 +162,8 @@ public final class MainActivity
     protected void onDestroy() {
         super.onDestroy();
 
-        mSubscriptionList.unsubscribe();
+        if (!mDisposables.isDisposed()) {
+            mDisposables.dispose();
+        }
     }
 }
